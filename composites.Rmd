@@ -1,0 +1,582 @@
+---
+title: "Evaluación de datos satelitales de ICESat-2 y Sentinel-2 para la caracterización de plantaciones de Eucalyptus en la provincia de Entre Ríos, Argentina"
+output: html_notebook
+---
+
+### **1.Cargar el paquete rgee e inicializar Google Earth Engine**
+```{r, warning=FALSE, message=FALSE}
+reticulate::use_python("C:/Users/Daniela Herrera/AppData/Roaming/rminiconda/Daniela/envs/rgee/python.exe", required = TRUE)
+reticulate::py_config()
+
+library(rgee)
+ee_Initialize(email = danherrera@agro.uba.ar, drive = TRUE)
+```
+
+
+### **2.Cargar el paquete sf, importar y filtrar la capa de Departamentos desde Google Earth Engine**
+```{r, warning=FALSE, message=FALSE}
+library(sf)
+shape <- ee$FeatureCollection('users/danherrera/departamentos')
+shp_depto <- shape$filter(ee$Filter$eq('NAM', 'Concordia'))
+shape_plantaciones <- ee$FeatureCollection('users/danherrera/macizos_concordia_2022')
+```
+
+
+### **3.Filtra la colección de Sentinel-2 ('COPERNICUS/S2_SR') según área de estudio (shp Concordia), fecha y porcentaje máximo de nubosidad ('CLOUD_COVERAGE_ASSESSMENT'):**
+```{r}
+s2_sr <- ee$ImageCollection('COPERNICUS/S2')$
+  filterBounds(shp_depto)$
+  filterDate('2022-01-01', '2022-01-14')$
+  filter(ee$Filter$lt('CLOUD_COVERAGE_ASSESSMENT', 10))
+```
+
+### **4. Se establecen parámetros de visualización:**
+```{r message = FALSE, warning=FALSE}
+imageVisParam <- list(bands = c('B8A', 'B11', 'B2'), min = 50, max = 3241)
+```
+
+
+### **5.Crea un composite a partir del valor de la mediana de cada píxel en las imágenes de la colección:**
+```{r}
+s2_sr <- s2_sr$median()
+```
+
+
+### **6.Genera un mapa para visualizar el mosaico generado de Sentinel-2 y las plantaciones de _Eucalyptus_**
+```{r, warning=FALSE, message=FALSE}
+empty = ee$Image()$byte()
+empty_2 = ee$Image()$byte()
+
+outline = empty$paint(
+  featureCollection= shp_depto,
+  color= 1,
+  width= 2)
+
+outline_2 = empty_2$paint(
+  featureCollection= shape_plantaciones,
+  color= 3,
+  width= 0.5)
+
+s2_sr <- s2_sr$clip(shp_depto)
+Map$addLayer(s2_sr, imageVisParam, 'Mosaico') +  
+Map$addLayer(outline, name = 'Concordia') +
+Map$addLayer(outline_2, name = 'Macizos Eucalyptus')
+Map$centerObject(shp_depto)
+
+```
+
+ 
+
+### **7.Nombre de bandas del composite /selección**
+```{r}
+imagen <- s2_sr$select("B2","B3","B4","B5","B6","B7","B8", "B8A","B11","B12")
+imagen$bandNames()$getInfo()
+```
+
+
+### **8.Generación de índices de vegetación**
+```{r}
+NDVIS2 <- imagen$expression(
+    expression = '(NIR - RED) / (NIR + RED)', 
+    opt_map = list(
+      'NIR' = imagen$select('B8'),
+      'RED' = imagen$select('B4')
+))$rename('NDVIS2')
+
+NDVI_RE <- imagen$expression(
+    expression = '(NIR - RED) / (NIR + RED)', 
+    opt_map = list(
+      'NIR' = imagen$select('B8A'),
+      'RED' = imagen$select('B4')
+))$rename('NDVI_RE')
+
+ND54S2 <- imagen$expression(
+    expression = '(NIR - RED) / (NIR + RED)', 
+    opt_map = list(
+      'NIR' = imagen$select('B11'),
+      'RED' = imagen$select('B8')
+))$rename('ND54S2')
+
+ND118A <- imagen$expression(
+    expression = '(B11 - B8A) / (B11 + B8A)', 
+    opt_map = list(
+      'B11' = imagen$select('B11'),
+      'B8A' = imagen$select('B8A')
+))$rename('ND118A')
+
+SAVI <- imagen$expression(
+    expression = '((B8 - B4) / ((B8 + B4) + 0.5) *1.5)', 
+    opt_map = list(
+      'B8' = imagen$select('B8'),
+      'B4' = imagen$select('B4')
+))$rename('SAVI')
+
+ARVIS2 <- imagen$expression(
+    expression = 'float ((NIR - (2 * RED) + BLUE) / (NIR + (2 * RED) + BLUE))', 
+    opt_map = list(
+      'NIR' = imagen$select('B8'),
+      'BLUE' = imagen$select('B2'), 
+      'RED' = imagen$select('B4')
+))$rename('ARVIS2')
+    
+```
+
+### **9.Añadir bandas de índices a la imagen**
+```{r}
+imagen <- imagen$addBands(NDVIS2)
+imagen <- imagen$addBands(NDVI_RE)
+imagen <- imagen$addBands(ND54S2)
+imagen <- imagen$addBands(ND118A)
+imagen <- imagen$addBands(SAVI)
+imagen <- imagen$addBands(ARVIS2)
+imagen$bandNames()$getInfo()
+```
+
+
+### **10.Cargar segmentos ICESat-2 enero 2022**
+```{r}
+seg_ic2 <- ee$FeatureCollection('users/danherrera/prueba_09_08')
+```
+
+
+### **11.Extracción de reflectancia dentro de los segmentos de Icesat-2**
+```{r}
+reflectancia <- imagen$sampleRegions(
+  collection = seg_ic2, 
+  properties = list("h_canopy","h_mean_can", "beam", "anio_plant", "densidad", "id_seg"),
+  scale = 10
+)
+```
+
+### **12.Exportar valores de reflectancia a csv**
+Inicia una tarea en la plataforma de GEE para exportar a la cuenta de Drive asociada
+```{r}
+task_tabla <- ee_table_to_drive(
+  collection = reflectancia,
+  description = "Extraccion_icesat2_23",
+  fileNamePrefix = "Icesat2_2023",
+  timePrefix = TRUE,
+  fileFormat = "CSV"
+)
+
+task_tabla$start()
+```
+
+
+### **13.Descargar desde Google Drive la tabla con valores de reflectancia por segmento de ICESat-2 y leer el csv de la tabla**
+```{r, message=FALSE, warning=FALSE}
+
+library(readr)
+datos <- read_csv("C:/Altura_2023/icesat_datos.csv")
+```
+
+### **14.Agrupar datos según ID de segmento y promediar valores de reflectancia para cada banda e índice**
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+datos_media <- datos %>% group_by(id_seg) %>% summarise_all(list(media = mean))
+datos_media <- datos_media[, c(-1, -2, -19, -20, -22)]
+class(datos_media)
+```
+
+### **15.Explorar datos_media**
+```{r}
+summary(datos_media)
+str(datos_media)
+dim(datos_media)
+```
+
+### **16.Renombrar columnas de datos_media**
+```{r}
+datos_media <- datos_media %>% 
+        rename("ARVIS2" = "ARVIS2_media",
+               "B11" = "B11_media",
+               "B12" = "B12_media",
+               "B2"= "B2_media",
+               "B3"= "B3_media",
+               "B4" = "B4_media",
+               "B5" = "B5_media",
+               "B6" = "B6_media",
+               "B7" = "B7_media",
+               "B8" = "B8_media",
+               "B8A" = "B8A_media",
+               "ND118A" = "ND118A_media",
+               "ND54S2" = "ND54S2_media",
+               "NDVIS2" = "NDVIS2_media",
+               "NDVI_RE" = "NDVI_RE_media",
+               "SAVI" = "SAVI_media",
+               )
+names(datos_media)
+```
+
+
+### **17.Graficar histograma de frecuencia**
+Histograma
+```{r}
+library(ggplot2)
+histograma <- ggplot(datos_media, aes(x=h_mean_can_media)) + 
+  labs(x = "Altura promedio", y = "Conteo") +
+  geom_histogram(binwidth= 5, color="darkgrey", fill="#120566", boundary = 0) + theme(plot.title = element_text(color="red", size=14, face="bold.italic"),
+                                                                      axis.title.x = element_text(color="black", size=12, face="bold"),
+                                                                      axis.title.y = element_text(color="black", size=12, face="bold"),
+                                                                      panel.grid.minor = element_blank()) +
+  scale_x_continuous(breaks = seq(0, 40, by = 5)) + scale_y_continuous(breaks = seq(0, 150, by = 25))
+histograma
+```
+
+### **18.Librerías para el modelado y mapeo**
+```{r, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(randomForest)
+library(readxl)
+library(tidyverse)
+library(caret)
+library(dplyr)
+library(lattice)
+library(lava)
+library(purrr)
+library(raster)
+library(rgdal)
+library(sf)
+library(colorRamps)
+```
+
+### **19.División de datos en muestras de entrenamiento y validación para la generación del modelo de regresión con Random Forest**
+```{r}
+set.seed(567)
+train <- createDataPartition(datos_media$h_mean_can_media, p= 0.8, list = F)
+datos_entrenamiento_prom <- datos_media[train, ]
+datos_validacion_prom <- datos_media[-train,]
+
+summary(datos_entrenamiento_prom$h_mean_can_media)
+summary(datos_validacion_prom$h_mean_can_media)
+class(datos_entrenamiento_prom)
+str(datos_entrenamiento_prom)
+```
+
+
+### **20.Modelo Random Forest**
+```{r}
+set.seed(123)
+modelo1 <- randomForest(h_mean_can_media ~ B2+B3+B4+B5+B6+B7+B8+B8A+B11+B12+NDVIS2+ND118A+ND54S2+NDVI_RE+ARVIS2+SAVI,
+                        data=datos_entrenamiento_prom, proximity=TRUE, type = regression, ntree = 1000, importance = TRUE)
+print(modelo1)
+(rmse_modelo1 <- sqrt(31.44188))
+```
+
+### **21.Generación de data frame para graficar importancia **
+```{r, echo=FALSE, message=FALSE, results='hide', eval=FALSE}
+importance(modelo1)
+ImpData <- as.data.frame(importance(modelo1))
+ImpData$Var.Names <- row.names(ImpData)
+ImpData
+ImpData1 <- arrange(ImpData, `%IncMSE`)
+```
+
+### **21.Gráfico de importancia de variables**
+```{r}
+import_plot <- ggplot(ImpData1, aes(x=`%IncMSE`, y=reorder(Var.Names, `%IncMSE`))) +
+  labs(x = '%IncMSE', y = "Variable predictora") + geom_point(alpha = 1, size= 2, fill= "blue", colour = "darkblue") +
+  theme(panel.grid.minor = element_blank(),
+        axis.title.x = element_text(color="black", size=13, face="bold"),
+        axis.title.y = element_text(color="black", size=13, face="bold"))
+import_plot  
+
+```
+
+### **22.Evaluación del modelo**
+```{r}
+postResample(predict(modelo1, newdata = datos_validacion_prom), datos_validacion_prom$h_mean_can_media)
+datos_validacion_prom$h_canopy_est_prom<- predict(modelo1, datos_validacion_prom) 
+```
+
+### **23.Gráfico Observados vs Predichos**
+```{r, warning=FALSE, message=FALSE}
+plot <- obs_pred <- ggplot(datos_validacion_prom, aes(x = h_canopy_est_prom, y = h_mean_can_media)) +
+    geom_point(fill = "black", alpha = 0.8, colour = "black") +
+    labs(x = "Altura estimada", y = "Altura observada") +
+    geom_abline(yintercept = 0) +
+    geom_smooth(method = "lm", se = FALSE, color = "blue", fill = "blue", fullrange = TRUE, linetype= "dashed", show.legend = TRUE) + 
+    coord_equal() +xlim(c(0,40)) + ylim(c(0,40)) + theme(plot.title = element_text(color="red", size=14, face="bold.italic"),
+                                                       axis.title.x = element_text(color="black", size=13, face="bold"),
+                                                       axis.title.y = element_text(color="black", size=13, face="bold"),
+                                                       panel.grid.major = element_blank()) 
+
+library(ggpmisc)
+summ <- datos_validacion_prom %>% 
+  summarise(R2 = R2(h_canopy_est_prom, h_mean_can_media),
+            RMSE = RMSE(h_canopy_est_prom, h_mean_can_media)) %>% 
+  mutate_if(is.numeric, round, digits=2) 
+#format(round(a), nsmall = 2)
+
+
+summ
+plot + geom_table_npc(data = summ, 
+                      label = list(summ),
+                      npcx = 0.057, npcy = 0.95,
+                      table.theme = ttheme_gtlight)
+
+```
+
+
+### **24.Descarga de bandas individuales**
+```{r}
+banda2 <- imagen$select('B2')
+exportar_b2 <- ee_image_to_drive(
+banda2,
+description = "B2",
+scale = 10,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_b2$start()
+
+banda3 <- imagen$select('B3')
+exportar_b3 <- ee_image_to_drive(
+banda3,
+description = "B3",
+scale = 10,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_b3$start()
+
+banda4 <- imagen$select('B4')
+exportar_b4 <- ee_image_to_drive(
+banda4,
+description = "B4",
+scale = 10,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_b4$start()
+
+banda5 <- imagen$select('B5')
+exportar_b5 <- ee_image_to_drive(
+banda5,
+description = "B5",
+scale = 20,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_b5$start() 
+
+banda6 <- imagen$select('B6')
+exportar_b6 <- ee_image_to_drive(
+banda6,
+description = "B6",
+scale = 20,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_b6$start()
+
+imagen$bandNames()$getInfo()
+
+banda7 <- imagen$select('B7')
+exportar_b7 <- ee_image_to_drive(
+banda7,
+description = "B7",
+scale = 20,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_b7$start()
+
+banda8 <- imagen$select('B8')
+exportar_b8 <- ee_image_to_drive(
+banda8,
+description = "B8",
+scale = 10,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_b8$start()
+
+banda8A <- imagen$select('B8A')
+exportar_b8A <- ee_image_to_drive(
+banda8A,
+description = "B8A",
+scale = 20,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_b8A$start()
+
+banda11 <- imagen$select('B11')
+exportar_b11 <- ee_image_to_drive(
+banda11,
+description = "B11",
+scale = 20,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_b11$start()
+
+banda12 <- imagen$select('B12')
+exportar_b12 <- ee_image_to_drive(
+banda12,
+description = "B12",
+scale = 20,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_b12$start()
+
+NDVIS2 <- imagen$select('NDVIS2')
+exportar_NDVIS2 <- ee_image_to_drive(
+NDVIS2,
+description = "NDVIS2",
+scale = 10,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_NDVIS2$start()
+
+NDVI_RE <- imagen$select('NDVI_RE')
+exportar_NDVI_RE <- ee_image_to_drive(
+NDVI_RE,
+description = "NDVI_RE",
+scale = 20,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_NDVI_RE$start()
+
+ND54S2 <- imagen$select('ND54S2')
+exportar_ND54S2 <- ee_image_to_drive(
+ND54S2,
+description = "ND54S2",
+scale = 20,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_ND54S2$start()
+
+ND118A <- imagen$select('ND118A')
+exportar_ND118A <- ee_image_to_drive(
+ND118A,
+description = "ND118A",
+scale = 20,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_ND118A$start()
+
+SAVI <- imagen$select('SAVI')
+exportar_SAVI <- ee_image_to_drive(
+SAVI,
+description = "SAVI",
+scale = 10,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_SAVI$start()
+
+ARVIS2 <- imagen$select('ARVIS2')
+exportar_ARVIS2 <- ee_image_to_drive(
+ARVIS2,
+description = "ARVIS2",
+scale = 10,
+crs = "EPSG:4326",
+region = shp_depto$geometry())
+exportar_ARVIS2$start()
+```
+
+
+### **25.Cargar las bandas exportadas**
+```{r}
+ARVIS2 <- raster("C:/Tesis/ARVIS2_media.tif")
+ND54S2 <- raster("C:/Tesis/ND54S2_media.tif")
+ND118A <- raster("C:/Tesis/ND118A_media.tif")
+NDVI_RE <- raster("C:/Tesis/NDVI_RE_media.tif")
+NDVIS2 <- raster("C:/Tesis/NDVIS2_media.tif")
+B2 <- raster("C:/Tesis/B2_media.tif")
+B3 <- raster("C:/Tesis/B3_media.tif")
+B4 <- raster("C:/Tesis/B4_media.tif")
+B5 <- raster("C:/Tesis/B5_media.tif")
+B6 <- raster("C:/Tesis/B6_media.tif")
+B7 <- raster("C:/Tesis/B7_media.tif")
+B8 <- raster("C:/Tesis/B8_media.tif")
+B8A <- raster("C:/Tesis/B8A_media.tif")
+B11 <- raster("C:/Tesis/B11_media.tif")
+B12 <- raster("C:/Tesis/B12_media.tif")
+SAVI <- raster("C:/Tesis/SAVI_media.tif")
+```
+
+### **26.Resolución de las bandas e índices de Sentinel-2**
+```{r}
+raster::res(ARVIS2)
+raster::res(B12)
+raster::res(B3)
+compareRaster(B4, B2)
+```
+
+### **27.Remuestreo de las bandas e índices de Sentinel-2 para logar una resolución de 10 m**
+```{r}
+B5 <- resample(B5, B4, method='bilinear')
+B6 <- resample(B6, B4, method='bilinear')
+B7 <- resample(B7, B4, method='bilinear')
+B8A <- resample(B8A, B4, method='bilinear')
+B11 <- resample(B11, B4, method='bilinear')
+B12 <- resample(B12, B4, method='bilinear')
+ND54S2 <- resample(ND54S2, B4, method='bilinear')
+NDVI_RE <- resample(NDVI_RE, B4, method='bilinear')
+ND118A <- resample(ND118A, B4, method='bilinear')
+```
+
+
+### **28.Generación de una pila raster o raster stack**
+```{r}
+stack_datos <- stack(list(ARVIS2, NDVIS2, B2, B3, B4, B5, B6, B7, B8, B8A, B11, B12, ND54S2, NDVI_RE, ND118A, SAVI))
+names(stack_datos)
+```
+
+### **29.Mapear predicciones y guardar raster**
+```{r}
+mapa_altura23 <- raster::predict(model=modelo1, object=stack_crop)
+palette <- matlab.like(20)
+plot(mapa_altura23, col=palette)
+writeRaster(mapa_altura23, filename= "C:/Tesis/altura_media.tif", format='GTiff')
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
